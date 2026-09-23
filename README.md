@@ -1,238 +1,227 @@
-# Matched Betting Analytics Platform
+Financial Activity & Reconciliation Platform
 
-A PostgreSQL-based accounting and reconciliation system for tracking matched-betting activity across bookmakers, betting exchanges, and funding accounts.
+A PostgreSQL relational data system for modelling transactions, betting positions, promotional assets, liabilities and account balances across multiple financial platforms.
 
-## Project Purpose
+The project uses matched betting as its business domain, creating a non-trivial accounting problem involving cash movements, linked financial positions, promotional assets with distinct lifecycles, settlement events and reconciliation across independent platforms.
 
-The database acts as the accounting and reconciliation layer of a broader matched-betting system.
+Why I Built It
 
-It records cash movements and betting activity and tracks the full promotional lifecycle: from qualifying bets, to unlocked rewards, to the bets on which those rewards are used and the value ultimately extracted from them.
+Matched betting activity quickly becomes difficult to reconcile when spread across multiple bookmakers, exchanges and funding accounts.
 
-It also links bookmaker bets with their corresponding exchange hedges, allowing balances, exposure, and overall profitability to be reconciled across multiple platforms.
+A single promotional cycle can involve:
 
-The long-term aim is to develop this foundation into a more automated system for tracking promotions, managing bankroll allocation, analysing performance, and supporting betting decisions.
+* capital moving between accounts
+* a qualifying position
+* an offsetting exchange position
+* a promotional reward being generated
+* the reward being used in a subsequent position
+* further hedging activity
+* settlement across different platforms
+* cash eventually being withdrawn or redeployed
 
-## Core Data Model
+Tracking only account balances loses the relationships between these events.
 
-The database is organised around six main tables.
+I built this project to explore how a relational database could represent the underlying system while preserving enough history to reconstruct balances, investigate discrepancies and analyse profitability.
 
-### `platforms`
+System Design
 
-Stores the accounts through which money and betting activity flow, including:
+The database separates different business concepts rather than storing activity in a single flat structure.
 
-- bookmakers
-- betting exchanges
-- bank accounts
-- wallets
+The principal entities include:
 
-Each platform has a type and a default commission rate.
+platforms
 
-### `promotions`
+Represents bookmakers, betting exchanges, bank accounts and wallets through which financial activity flows.
 
-Stores bookmaker promotional offers and their qualification requirements.
+promotions
 
-Examples of tracked attributes include:
+Represents promotional offers and their qualification requirements, status and expected reward.
 
-- qualifying stake
-- minimum odds
-- minimum number of selections
-- reward value
-- reward type
-- promotion status
-- expiry date
+This allows an offer to move through a defined lifecycle from availability through qualification, reward crediting and completion.
 
-This allows the system to track a promotion from availability through qualification, reward crediting, and completion.
+bets
 
-### `bets`
+Stores financial positions placed with bookmakers and exchanges.
 
-Stores both bookmaker BACK bets and exchange LAY bets.
+The model distinguishes BACK and LAY positions and records stake, odds, liability, commission, settlement state, cash return and relevant timestamps.
 
-The table records:
+bet_legs
 
-- platform
-- promotion
-- stake type
-- bet side
-- bet type
-- stake
-- decimal odds
-- liability
-- commission
-- settlement status
-- cash return
-- placement and settlement timestamps
+Separates individual selections from the parent bet, allowing multi-selection positions such as accumulators to be represented without duplicating the parent transaction.
 
-Bets can also reference other bets, allowing bookmaker bets and their exchange hedges to be linked.
+rewards
 
-### `bet_legs`
+Represents promotional assets separately from both cash and bets.
 
-Stores the individual selections within a bet.
+A reward can be linked to the qualifying activity that generated it and the subsequent activity through which it was converted, providing traceability across the promotional lifecycle.
 
-This is particularly useful for accumulators, where a single bet can contain several selections with different events, markets, odds, and outcomes.
+transactions
 
-A lay bet can also reference a particular bet leg when an individual accumulator selection is hedged.
+Functions as the system’s cash ledger.
 
-### `rewards`
+Deposits, withdrawals and transfers are preserved as individual financial events rather than repeatedly overwriting an account balance.
 
-Stores promotional assets generated by bookmaker offers, including:
+This allows balances to be reconstructed from historical activity and provides an audit trail for reconciliation.
 
-- free bets
-- cash rewards
-- bonuses
+Relational Modelling
 
-Rewards can reference both:
+One of the main challenges in the project has been representing relationships between positions placed on independent platforms.
 
-- the qualifying bet that generated the reward
-- the subsequent bet on which the reward was used
+A bookmaker BACK position may be offset by an exchange LAY position, while more complex strategies can introduce relationships that are not naturally represented by a simple one-to-one link.
 
-This creates a traceable chain from promotional qualification to reward conversion.
+The schema has therefore evolved as additional real activity exposed limitations in earlier modelling assumptions.
 
-### `transactions`
+This has made the project an ongoing exercise in relational modelling: identifying entities, determining appropriate relationships and cardinalities, and refactoring the schema when the real-world process no longer fits the original abstraction.
 
-Acts as the cash ledger.
+Promotional Lifecycle
 
-Rather than storing only current balances, the database records individual movements of money into and out of each platform.
+The system preserves the relationship between promotional qualification and eventual value extraction:
 
-Positive values represent money entering an account and negative values represent money leaving it.
+Promotion
+    ↓
+Qualifying Activity
+    ↓
+  Reward
+    ↓
+Reward Usage
+    ↓
+Cash Value
 
-This allows platform balances to be reconstructed from historical activity.
+This makes it possible to distinguish promotional face value from realised cash value and analyse the complete lifecycle rather than treating rewards as ordinary deposits.
 
-## Key Relationships
+Reconciliation and Derived Data
 
-The principal promotional lifecycle is:
+Rather than storing every calculated metric directly in the base tables, PostgreSQL views provide reusable analytical layers over the underlying records.
 
-    Promotion
+v_bet_reconciliation
+
+Calculates the financial result of settled positions while accounting for differences between:
+
+* cash-backed bookmaker positions
+* promotional/free-bet positions
+* exchange wins
+* exchange losses and liabilities
+* commission
+
+This produces a consistent derived net_result without duplicating calculated profit in the base data.
+
+v_platform_transaction_flows
+
+Aggregates ledger activity into money in, money out and net transaction flow by platform.
+
+platform_cash_balances
+
+Combines transaction history with settled position results to reconstruct platform-level cash balances.
+
+platform_overview
+
+Combines cash balances with active promotional assets to provide a broader operational view of value held across platforms.
+
+v_bankroll_summary
+
+Produces portfolio-level measures including external capital, current cash, reserved liabilities, net profit and return on investment.
+
+Data Integrity
+
+Business rules are enforced in PostgreSQL wherever practical rather than relying solely on application behaviour.
+
+The schema uses:
+
+* primary and foreign keys
+* controlled status values
+* CHECK constraints
+* positive stake and odds requirements
+* liability validation
+* referential integrity between related entities
+* unique leg numbering within bets
+
+For example, LAY positions require a liability while BACK positions must not contain one.
+
+These constraints prevent several classes of invalid record from entering the system.
+
+Accounting Approach
+
+The project follows a ledger-oriented approach.
+
+Financial movements are stored as immutable transaction records rather than maintaining a manually updated balance field.
+
+Current balances can therefore be derived from:
+
+transaction history
+        +
+settled position P&L
         ↓
-    Qualifying Bet
-        ↓
-      Reward
-        ↓
-    Reward Bet
-        ↓
-    Cash Extraction
+reconstructed balance
 
-Matched betting introduces a second relationship:
+This provides a clearer audit trail and makes discrepancies easier to investigate.
 
-    Bookmaker BACK Bet
-            ↕
-       Exchange LAY Bet
+What I Learned
 
-Together, these relationships allow promotional activity and hedging activity to be analysed as parts of the same financial system.
+The project began as a practical tracking tool but developed into a broader exercise in database design.
 
-## Views and Derived Metrics
+Working with real activity exposed modelling problems that were not obvious when designing the initial schema. In particular, relationships that initially appeared one-to-one became more complex as additional cases were encountered.
 
-Several PostgreSQL views provide reusable analytical layers over the underlying tables.
+This required revisiting earlier assumptions, migrating existing data and separating concepts that had initially been combined.
 
-### `v_bet_reconciliation`
+The project has strengthened my understanding of:
 
-Calculates the financial result of individual bets according to their type and outcome.
+* relational data modelling
+* schema evolution
+* referential integrity
+* financial reconciliation
+* derived versus stored data
+* data quality and validation
+* designing around real business processes rather than idealised datasets
 
-The calculation distinguishes between:
+Current Status
 
-- cash-backed bookmaker wins and losses
-- free-bet wins and losses
-- winning lay bets
-- losing lay bets and their liabilities
+The PostgreSQL system currently supports:
 
-This produces a consistent `net_result` field without storing derived profit directly in the base table.
+* financial transaction tracking
+* position and settlement recording
+* promotional lifecycle tracking
+* reward tracking
+* cross-platform reconciliation
+* platform balance reconstruction
+* liability and exposure reporting
+* portfolio-level profitability analysis
 
-### `v_platform_transaction_flows`
+Some historical records were reconstructed manually from account histories, so certain historical timestamps and relationships remain incomplete.
 
-Aggregates ledger activity by platform and reports:
+Data ingestion and reconciliation are currently primarily manual.
 
-- money in
-- money out
-- net transaction flow
+Next Steps
 
-### `platform_cash_balances`
+The current database provides the foundation for moving from manual recording toward an automated data pipeline.
 
-Combines transaction flows with settled betting profit and loss to reconstruct the current cash balance of each platform.
+Planned areas for development include:
 
-### `platform_overview`
+* Python-based data ingestion
+* repeatable and idempotent loading processes
+* automated data-quality checks
+* automated reconciliation
+* logging and error handling
+* testing
+* analytical dashboards
+* orchestration of recurring workflows
 
-Combines platform cash balances with active promotional assets to provide an operational view of value held on each platform.
+These additions would extend the project from a relational accounting system toward a small end-to-end data engineering pipeline.
 
-### `v_bankroll_summary`
+Technology
 
-Provides portfolio-level metrics including:
+Current
 
-- external capital contributed
-- current betting cash
-- reserved lay liabilities
-- total bankroll
-- net profit
-- return on investment
+* PostgreSQL
+* SQL
+* relational data modelling
+* PostgreSQL views
+* constraints and referential integrity
+* Git / GitHub
 
-## Data Integrity
+Planned
 
-The schema uses PostgreSQL constraints to prevent invalid states.
-
-These include:
-
-- primary keys for unique row identification
-- foreign keys for referential integrity
-- CHECK constraints for valid statuses and transaction types
-- positive stake and odds requirements
-- liability requirements for LAY bets
-- NULL liability requirements for BACK bets
-- unique leg numbers within individual bets
-
-Self-referencing foreign keys are used to represent relationships between related bets.
-
-## Accounting Approach
-
-The system follows a ledger-oriented approach.
-
-Cash movements are preserved as individual transactions rather than repeatedly overwriting account balances.
-
-Current balances are therefore derived from recorded financial events and betting results.
-
-This provides an audit trail and makes discrepancies easier to investigate.
-
-## Current Status
-
-Version 1 provides a functional PostgreSQL foundation for:
-
-- recording matched-betting activity
-- tracking promotions and rewards
-- linking bookmaker and exchange bets
-- tracking cash movements
-- reconstructing platform balances
-- measuring bankroll-level profitability and exposure
-
-The database has been tested against real betting activity across multiple bookmakers and exchanges.
-
-## Known Limitations
-
-Version 1 still contains several deliberate simplifications.
-
-Some historical records were reconstructed manually from bookmaker and exchange account histories, meaning certain timestamps and historical relationships may be incomplete.
-
-Spread-betting promotional activity is not modelled at the same level of detail as fixed-odds sportsbook activity.
-
-The current system also requires manual data entry and reconciliation.
-
-These limitations provide natural targets for future development.
-
-## Future Development
-
-Potential next stages include:
-
-- automated data ingestion
-- automated bet and hedge reconciliation
-- promotion opportunity tracking
-- bankroll allocation tools
-- conversion-rate analysis
-- offer profitability analysis
-- automated QA checks
-- Python integration
-- analytical dashboards and visualisation
-
-## Technology
-
-- PostgreSQL
-- SQL
-- PostgreSQL views and constraints
-- Git / GitHub
-
-Future versions are intended to incorporate Python-based automation and analytical tooling.
+* Python
+* automated ingestion
+* testing
+* orchestration
+* analytical visualisation
